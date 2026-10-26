@@ -8,7 +8,6 @@ Exit status will be 0 if successful, and the program will be silent.
 Otherwise the exit status will be 1 and it will log which executables failed which checks.
 '''
 import sys
-from typing import List
 
 import lief
 
@@ -39,13 +38,13 @@ def check_ELF_RELRO(binary) -> bool:
 
     return have_gnu_relro and have_bindnow
 
-def check_ELF_Canary(binary) -> bool:
+def check_ELF_CANARY(binary) -> bool:
     '''
     Check for use of stack canary
     '''
     return binary.has_symbol('__stack_chk_fail')
 
-def check_ELF_separate_code(binary):
+def check_ELF_SEPARATE_CODE(binary):
     '''
     Check that sections are appropriately separated in virtual memory,
     based on their permissions. This checks for missing -Wl,-z,separate-code
@@ -106,14 +105,14 @@ def check_ELF_separate_code(binary):
                 return False
     return True
 
-def check_ELF_control_flow(binary) -> bool:
+def check_ELF_CONTROL_FLOW(binary) -> bool:
     '''
     Check for control flow instrumentation
     '''
     main = binary.get_function_address('main')
     content = binary.get_content_from_virtual_address(main, 4, lief.Binary.VA_TYPES.AUTO)
 
-    if content == [243, 15, 30, 250]: # endbr64
+    if content.tolist() == [243, 15, 30, 250]: # endbr64
         return True
     return False
 
@@ -131,7 +130,7 @@ def check_PE_RELOC_SECTION(binary) -> bool:
     '''Check for a reloc section. This is required for functional ASLR.'''
     return binary.has_relocations
 
-def check_PE_control_flow(binary) -> bool:
+def check_PE_CONTROL_FLOW(binary) -> bool:
     '''
     Check for control flow instrumentation
     '''
@@ -142,11 +141,11 @@ def check_PE_control_flow(binary) -> bool:
 
     content = binary.get_content_from_virtual_address(virtual_address, 4, lief.Binary.VA_TYPES.VA)
 
-    if content == [243, 15, 30, 250]: # endbr64
+    if content.tolist() == [243, 15, 30, 250]: # endbr64
         return True
     return False
 
-def check_PE_Canary(binary) -> bool:
+def check_PE_CANARY(binary) -> bool:
     '''
     Check for use of stack canary
     '''
@@ -158,14 +157,13 @@ def check_MACHO_NOUNDEFS(binary) -> bool:
     '''
     return binary.header.has(lief.MachO.HEADER_FLAGS.NOUNDEFS)
 
-def check_MACHO_LAZY_BINDINGS(binary) -> bool:
+def check_MACHO_FIXUP_CHAINS(binary) -> bool:
     '''
-    Check for no lazy bindings.
-    We don't use or check for MH_BINDATLOAD. See #18295.
+    Check for use of chained fixups.
     '''
-    return binary.dyld_info.lazy_bind == (0,0)
+    return binary.has_dyld_chained_fixups
 
-def check_MACHO_Canary(binary) -> bool:
+def check_MACHO_CANARY(binary) -> bool:
     '''
     Check for use of stack canary
     '''
@@ -184,13 +182,23 @@ def check_NX(binary) -> bool:
     '''
     return binary.has_nx
 
-def check_MACHO_control_flow(binary) -> bool:
+def check_MACHO_CONTROL_FLOW(binary) -> bool:
     '''
     Check for control flow instrumentation
     '''
     content = binary.get_content_from_virtual_address(binary.entrypoint, 4, lief.Binary.VA_TYPES.AUTO)
 
-    if content == [243, 15, 30, 250]: # endbr64
+    if content.tolist() == [243, 15, 30, 250]: # endbr64
+        return True
+    return False
+
+def check_MACHO_BRANCH_PROTECTION(binary) -> bool:
+    '''
+    Check for branch protection instrumentation
+    '''
+    content = binary.get_content_from_virtual_address(binary.entrypoint, 4, lief.Binary.VA_TYPES.AUTO)
+
+    if content.tolist() == [95, 36, 3, 213]: # bti
         return True
     return False
 
@@ -198,8 +206,8 @@ BASE_ELF = [
     ('PIE', check_PIE),
     ('NX', check_NX),
     ('RELRO', check_ELF_RELRO),
-    ('Canary', check_ELF_Canary),
-    ('separate_code', check_ELF_separate_code),
+    ('CANARY', check_ELF_CANARY),
+    ('SEPARATE_CODE', check_ELF_SEPARATE_CODE),
 ]
 
 BASE_PE = [
@@ -208,19 +216,19 @@ BASE_PE = [
     ('HIGH_ENTROPY_VA', check_PE_HIGH_ENTROPY_VA),
     ('NX', check_NX),
     ('RELOC_SECTION', check_PE_RELOC_SECTION),
-    ('CONTROL_FLOW', check_PE_control_flow),
-    ('Canary', check_PE_Canary),
+    ('CONTROL_FLOW', check_PE_CONTROL_FLOW),
+    ('CANARY', check_PE_CANARY),
 ]
 
 BASE_MACHO = [
     ('NOUNDEFS', check_MACHO_NOUNDEFS),
-    ('LAZY_BINDINGS', check_MACHO_LAZY_BINDINGS),
-    ('Canary', check_MACHO_Canary),
+    ('CANARY', check_MACHO_CANARY),
+    ('FIXUP_CHAINS', check_MACHO_FIXUP_CHAINS),
 ]
 
 CHECKS = {
     lief.EXE_FORMATS.ELF: {
-        lief.ARCHITECTURES.X86: BASE_ELF + [('CONTROL_FLOW', check_ELF_control_flow)],
+        lief.ARCHITECTURES.X86: BASE_ELF + [('CONTROL_FLOW', check_ELF_CONTROL_FLOW)],
         lief.ARCHITECTURES.ARM: BASE_ELF,
         lief.ARCHITECTURES.ARM64: BASE_ELF,
         lief.ARCHITECTURES.PPC: BASE_ELF,
@@ -232,39 +240,24 @@ CHECKS = {
     lief.EXE_FORMATS.MACHO: {
         lief.ARCHITECTURES.X86: BASE_MACHO + [('PIE', check_PIE),
                                               ('NX', check_NX),
-                                              ('CONTROL_FLOW', check_MACHO_control_flow)],
-        lief.ARCHITECTURES.ARM64: BASE_MACHO,
+                                              ('CONTROL_FLOW', check_MACHO_CONTROL_FLOW)],
+        lief.ARCHITECTURES.ARM64: BASE_MACHO + [('BRANCH_PROTECTION', check_MACHO_BRANCH_PROTECTION)],
     }
 }
 
 if __name__ == '__main__':
     retval: int = 0
     for filename in sys.argv[1:]:
-        try:
-            binary = lief.parse(filename)
-            etype = binary.format
-            arch = binary.abstract.header.architecture
-            binary.concrete
+        binary = lief.parse(filename)
+        etype = binary.format
+        arch = binary.abstract.header.architecture
+        binary.concrete
 
-            if etype == lief.EXE_FORMATS.UNKNOWN:
-                print(f'{filename}: unknown executable format')
-                retval = 1
-                continue
-
-            if arch == lief.ARCHITECTURES.NONE:
-                print(f'{filename}: unknown architecture')
-                retval = 1
-                continue
-
-            failed: List[str] = []
-            for (name, func) in CHECKS[etype][arch]:
-                if not func(binary):
-                    failed.append(name)
-            if failed:
-                print(f'{filename}: failed {" ".join(failed)}')
-                retval = 1
-        except IOError:
-            print(f'{filename}: cannot open')
+        failed: list[str] = []
+        for (name, func) in CHECKS[etype][arch]:
+            if not func(binary):
+                failed.append(name)
+        if failed:
+            print(f'{filename}: failed {" ".join(failed)}')
             retval = 1
     sys.exit(retval)
-

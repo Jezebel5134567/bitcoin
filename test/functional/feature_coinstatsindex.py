@@ -242,6 +242,9 @@ class CoinStatsIndexTest(BitcoinTestFramework):
         res12 = index_node.gettxoutsetinfo('muhash')
         assert_equal(res12, res10)
 
+        self.log.info("Test obtaining info for a non-existent block hash")
+        assert_raises_rpc_error(-5, "Block not found", index_node.gettxoutsetinfo, hash_type="none", hash_or_height="ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", use_index=True)
+
     def _test_use_index_option(self):
         self.log.info("Test use_index option for nodes running the index")
 
@@ -293,11 +296,11 @@ class CoinStatsIndexTest(BitcoinTestFramework):
     def _test_index_rejects_hash_serialized(self):
         self.log.info("Test that the rpc raises if the legacy hash is passed with the index")
 
-        msg = "hash_serialized_2 hash type cannot be queried for a specific block"
-        assert_raises_rpc_error(-8, msg, self.nodes[1].gettxoutsetinfo, hash_type='hash_serialized_2', hash_or_height=111)
+        msg = "hash_serialized_3 hash type cannot be queried for a specific block"
+        assert_raises_rpc_error(-8, msg, self.nodes[1].gettxoutsetinfo, hash_type='hash_serialized_3', hash_or_height=111)
 
         for use_index in {True, False, None}:
-            assert_raises_rpc_error(-8, msg, self.nodes[1].gettxoutsetinfo, hash_type='hash_serialized_2', hash_or_height=111, use_index=use_index)
+            assert_raises_rpc_error(-8, msg, self.nodes[1].gettxoutsetinfo, hash_type='hash_serialized_3', hash_or_height=111, use_index=use_index)
 
     def _test_init_index_after_reorg(self):
         self.log.info("Test a reorg while the index is deactivated")
@@ -321,4 +324,4 @@ class CoinStatsIndexTest(BitcoinTestFramework):
 
 
 if __name__ == '__main__':
-    CoinStatsIndexTest().main()
+    CoinStatsIndexTest(__file__).main()

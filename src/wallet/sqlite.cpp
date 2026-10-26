@@ -2,6 +2,8 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
+#include <config/bitcoin-config.h> // IWYU pragma: keep
+
 #include <wallet/sqlite.h>
 
 #include <chainparams.h>
@@ -24,6 +26,12 @@
 namespace wallet {
 static constexpr int32_t WALLET_SCHEMA_VERSION = 0;
 
+static Span<const std::byte> SpanFromBlob(sqlite3_stmt* stmt, int col)
+{
+    return {reinterpret_cast<const std::byte*>(sqlite3_column_blob(stmt, col)),
+            static_cast<size_t>(sqlite3_column_bytes(stmt, col))};
+}
+
 static void ErrorLogCallback(void* arg, int code, const char* msg)
 {
     // From sqlite3_config() documentation for the SQLITE_CONFIG_LOG option:
@@ -44,7 +52,7 @@ static int TraceSqlCallback(unsigned code, void* context, void* param1, void* pa
         // in the log file, only expand statements that query the database, not
         // statements that update the database.
         char* expanded{sqlite3_stmt_readonly(stmt) ? sqlite3_expanded_sql(stmt) : nullptr};
-        LogPrintf("[%s] SQLite Statement: %s\n", db->Filename(), expanded ? expanded : sqlite3_sql(stmt));
+        LogTrace(BCLog::WALLETDB, "[%s] SQLite Statement: %s\n", db->Filename(), expanded ? expanded : sqlite3_sql(stmt));
         if (expanded) sqlite3_free(expanded);
     }
     return SQLITE_OK;
@@ -104,12 +112,12 @@ Mutex SQLiteDatabase::g_sqlite_mutex;
 int SQLiteDatabase::g_sqlite_count = 0;
 
 SQLiteDatabase::SQLiteDatabase(const fs::path& dir_path, const fs::path& file_path, const DatabaseOptions& options, bool mock)
-    : WalletDatabase(), m_mock(mock), m_dir_path(fs::PathToString(dir_path)), m_file_path(fs::PathToString(file_path)), m_use_unsafe_sync(options.use_unsafe_sync)
+    : WalletDatabase(), m_mock(mock), m_dir_path(dir_path), m_file_path(fs::PathToString(file_path)), m_write_semaphore(1), m_use_unsafe_sync(options.use_unsafe_sync)
 {
     {
         LOCK(g_sqlite_mutex);
         LogPrintf("Using SQLite Version %s\n", SQLiteDatabaseVersion());
-        LogPrintf("Using wallet %s\n", m_dir_path);
+        LogPrintf("Using wallet %s\n", fs::PathToString(m_dir_path));
 
         if (++g_sqlite_count == 1) {
             // Setup logging
@@ -187,7 +195,7 @@ bool SQLiteDatabase::Verify(bilingual_str& error)
     auto read_result = ReadPragmaInteger(m_db, "application_id", "the application id", error);
     if (!read_result.has_value()) return false;
     uint32_t app_id = static_cast<uint32_t>(read_result.value());
-    uint32_t net_magic = ReadBE32(Params().MessageStart());
+    uint32_t net_magic = ReadBE32(Params().MessageStart().data());
     if (app_id != net_magic) {
         error = strprintf(_("SQLiteDatabase: Unexpected application id. Expected %u, got %u"), net_magic, app_id);
         return false;
@@ -245,7 +253,7 @@ void SQLiteDatabase::Open()
 
     if (m_db == nullptr) {
         if (!m_mock) {
-            TryCreateDirectories(fs::PathFromString(m_dir_path));
+            TryCreateDirectories(m_dir_path);
         }
         int ret = sqlite3_open_v2(m_file_path.c_str(), &m_db, flags, nullptr);
         if (ret != SQLITE_OK) {
@@ -318,7 +326,7 @@ void SQLiteDatabase::Open()
         }
 
         // Set the application id
-        uint32_t app_id = ReadBE32(Params().MessageStart());
+        uint32_t app_id = ReadBE32(Params().MessageStart().data());
         SetPragma(m_db, "application_id", strprintf("%d", static_cast<int32_t>(app_id)),
                   "Failed to set the application id");
 
@@ -371,6 +379,17 @@ void SQLiteDatabase::Close()
     m_db = nullptr;
 }
 
+bool SQLiteDatabase::HasActiveTxn()
+{
+    // 'sqlite3_get_autocommit' returns true by default, and false if a transaction has begun and not been committed or rolled back.
+    return m_db && sqlite3_get_autocommit(m_db) == 0;
+}
+
+int SQliteExecHandler::Exec(SQLiteDatabase& database, const std::string& statement)
+{
+    return sqlite3_exec(database.m_db, statement.data(), nullptr, nullptr, nullptr);
+}
+
 std::unique_ptr<DatabaseBatch> SQLiteDatabase::MakeBatch(bool flush_on_close)
 {
     // We ignore flush_on_close because we don't do manual flushing for SQLite
@@ -388,12 +407,18 @@ SQLiteBatch::SQLiteBatch(SQLiteDatabase& database)
 
 void SQLiteBatch::Close()
 {
-    // If m_db is in a transaction (i.e. not in autocommit mode), then abort the transaction in progress
-    if (m_database.m_db && sqlite3_get_autocommit(m_database.m_db) == 0) {
+    bool force_conn_refresh = false;
+
+    // If we began a transaction, and it wasn't committed, abort the transaction in progress
+    if (m_txn) {
         if (TxnAbort()) {
             LogPrintf("SQLiteBatch: Batch closed unexpectedly without the transaction being explicitly committed or aborted\n");
         } else {
-            LogPrintf("SQLiteBatch: Batch closed and failed to abort transaction\n");
+            // If transaction cannot be aborted, it means there is a bug or there has been data corruption. Try to recover in this case
+            // by closing and reopening the database. Closing the database should also ensure that any changes made since the transaction
+            // was opened will be rolled back and future transactions can succeed without committing old data.
+            force_conn_refresh = true;
+            LogPrintf("SQLiteBatch: Batch closed and failed to abort transaction, resetting db connection..\n");
         }
     }
 
@@ -413,6 +438,19 @@ void SQLiteBatch::Close()
                       stmt_description, sqlite3_errstr(res));
         }
         *stmt_prepared = nullptr;
+    }
+
+    if (force_conn_refresh) {
+        m_database.Close();
+        try {
+            m_database.Open();
+            // If TxnAbort failed and we refreshed the connection, the semaphore was not released, so release it here to avoid deadlocks on future writes.
+            m_database.m_write_semaphore.post();
+        } catch (const std::runtime_error&) {
+            // If open fails, cleanup this object and rethrow the exception
+            m_database.Close();
+            throw;
+        }
     }
 }
 
@@ -434,10 +472,8 @@ bool SQLiteBatch::ReadKey(DataStream&& key, DataStream& value)
         return false;
     }
     // Leftmost column in result is index 0
-    const std::byte* data{AsBytePtr(sqlite3_column_blob(m_read_stmt, 0))};
-    size_t data_size(sqlite3_column_bytes(m_read_stmt, 0));
     value.clear();
-    value.write({data, data_size});
+    value.write(SpanFromBlob(m_read_stmt, 0));
 
     sqlite3_clear_bindings(m_read_stmt);
     sqlite3_reset(m_read_stmt);
@@ -461,6 +497,9 @@ bool SQLiteBatch::WriteKey(DataStream&& key, DataStream&& value, bool overwrite)
     if (!BindBlobToStatement(stmt, 1, key, "key")) return false;
     if (!BindBlobToStatement(stmt, 2, value, "value")) return false;
 
+    // Acquire semaphore if not previously acquired when creating a transaction.
+    if (!m_txn) m_database.m_write_semaphore.wait();
+
     // Execute
     int res = sqlite3_step(stmt);
     sqlite3_clear_bindings(stmt);
@@ -468,6 +507,9 @@ bool SQLiteBatch::WriteKey(DataStream&& key, DataStream&& value, bool overwrite)
     if (res != SQLITE_DONE) {
         LogPrintf("%s: Unable to execute statement: %s\n", __func__, sqlite3_errstr(res));
     }
+
+    if (!m_txn) m_database.m_write_semaphore.post();
+
     return res == SQLITE_DONE;
 }
 
@@ -479,6 +521,9 @@ bool SQLiteBatch::ExecStatement(sqlite3_stmt* stmt, Span<const std::byte> blob)
     // Bind: leftmost parameter in statement is index 1
     if (!BindBlobToStatement(stmt, 1, blob, "key")) return false;
 
+    // Acquire semaphore if not previously acquired when creating a transaction.
+    if (!m_txn) m_database.m_write_semaphore.wait();
+
     // Execute
     int res = sqlite3_step(stmt);
     sqlite3_clear_bindings(stmt);
@@ -486,6 +531,9 @@ bool SQLiteBatch::ExecStatement(sqlite3_stmt* stmt, Span<const std::byte> blob)
     if (res != SQLITE_DONE) {
         LogPrintf("%s: Unable to execute statement: %s\n", __func__, sqlite3_errstr(res));
     }
+
+    if (!m_txn) m_database.m_write_semaphore.post();
+
     return res == SQLITE_DONE;
 }
 
@@ -527,12 +575,8 @@ DatabaseCursor::Status SQLiteCursor::Next(DataStream& key, DataStream& value)
     value.clear();
 
     // Leftmost column in result is index 0
-    const std::byte* key_data{AsBytePtr(sqlite3_column_blob(m_cursor_stmt, 0))};
-    size_t key_data_size(sqlite3_column_bytes(m_cursor_stmt, 0));
-    key.write({key_data, key_data_size});
-    const std::byte* value_data{AsBytePtr(sqlite3_column_blob(m_cursor_stmt, 1))};
-    size_t value_data_size(sqlite3_column_bytes(m_cursor_stmt, 1));
-    value.write({value_data, value_data_size});
+    key.write(SpanFromBlob(m_cursor_stmt, 0));
+    value.write(SpanFromBlob(m_cursor_stmt, 1));
     return Status::MORE;
 }
 
@@ -606,30 +650,43 @@ std::unique_ptr<DatabaseCursor> SQLiteBatch::GetNewPrefixCursor(Span<const std::
 
 bool SQLiteBatch::TxnBegin()
 {
-    if (!m_database.m_db || sqlite3_get_autocommit(m_database.m_db) == 0) return false;
-    int res = sqlite3_exec(m_database.m_db, "BEGIN TRANSACTION", nullptr, nullptr, nullptr);
+    if (!m_database.m_db || m_txn) return false;
+    m_database.m_write_semaphore.wait();
+    Assert(!m_database.HasActiveTxn());
+    int res = Assert(m_exec_handler)->Exec(m_database, "BEGIN TRANSACTION");
     if (res != SQLITE_OK) {
         LogPrintf("SQLiteBatch: Failed to begin the transaction\n");
+        m_database.m_write_semaphore.post();
+    } else {
+        m_txn = true;
     }
     return res == SQLITE_OK;
 }
 
 bool SQLiteBatch::TxnCommit()
 {
-    if (!m_database.m_db || sqlite3_get_autocommit(m_database.m_db) != 0) return false;
-    int res = sqlite3_exec(m_database.m_db, "COMMIT TRANSACTION", nullptr, nullptr, nullptr);
+    if (!m_database.m_db || !m_txn) return false;
+    Assert(m_database.HasActiveTxn());
+    int res = Assert(m_exec_handler)->Exec(m_database, "COMMIT TRANSACTION");
     if (res != SQLITE_OK) {
         LogPrintf("SQLiteBatch: Failed to commit the transaction\n");
+    } else {
+        m_txn = false;
+        m_database.m_write_semaphore.post();
     }
     return res == SQLITE_OK;
 }
 
 bool SQLiteBatch::TxnAbort()
 {
-    if (!m_database.m_db || sqlite3_get_autocommit(m_database.m_db) != 0) return false;
-    int res = sqlite3_exec(m_database.m_db, "ROLLBACK TRANSACTION", nullptr, nullptr, nullptr);
+    if (!m_database.m_db || !m_txn) return false;
+    Assert(m_database.HasActiveTxn());
+    int res = Assert(m_exec_handler)->Exec(m_database, "ROLLBACK TRANSACTION");
     if (res != SQLITE_OK) {
         LogPrintf("SQLiteBatch: Failed to abort the transaction\n");
+    } else {
+        m_txn = false;
+        m_database.m_write_semaphore.post();
     }
     return res == SQLITE_OK;
 }

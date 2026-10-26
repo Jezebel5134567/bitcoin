@@ -14,14 +14,13 @@ struct CDiskTxPos : public FlatFilePos
 
     SERIALIZE_METHODS(CDiskTxPos, obj)
     {
-        READWRITEAS(FlatFilePos, obj);
-        READWRITE(VARINT(obj.nTxOffset));
+        READWRITE(AsBase<FlatFilePos>(obj), VARINT(obj.nTxOffset));
     }
 
     CDiskTxPos(const FlatFilePos &blockIn, unsigned int nTxOffsetIn) : FlatFilePos(blockIn.nFile, blockIn.nPos), nTxOffset(nTxOffsetIn) {
     }
 
-    CDiskTxPos() {}
+    CDiskTxPos() = default;
 };
 
 #endif // BITCOIN_INDEX_DISKTXPOS_H

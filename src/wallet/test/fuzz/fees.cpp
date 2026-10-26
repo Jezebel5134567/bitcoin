@@ -25,7 +25,7 @@ void initialize_setup()
     g_wallet_ptr = std::make_unique<CWallet>(node.chain.get(), "", CreateMockableWalletDatabase());
 }
 
-FUZZ_TARGET_INIT(wallet_fees, initialize_setup)
+FUZZ_TARGET(wallet_fees, .init = initialize_setup)
 {
     FuzzedDataProvider fuzzed_data_provider{buffer.data(), buffer.size()};
     const auto& node{g_setup->m_node};
@@ -34,6 +34,10 @@ FUZZ_TARGET_INIT(wallet_fees, initialize_setup)
     {
         LOCK(wallet.cs_wallet);
         wallet.SetLastBlockProcessed(chainstate->m_chain.Height(), chainstate->m_chain.Tip()->GetBlockHash());
+    }
+
+    if (fuzzed_data_provider.ConsumeBool()) {
+        wallet.m_fallback_fee = CFeeRate{ConsumeMoney(fuzzed_data_provider, /*max=*/COIN)};
     }
 
     if (fuzzed_data_provider.ConsumeBool()) {
@@ -57,6 +61,9 @@ FUZZ_TARGET_INIT(wallet_fees, initialize_setup)
     }
     if (fuzzed_data_provider.ConsumeBool()) {
         coin_control.m_confirm_target = fuzzed_data_provider.ConsumeIntegralInRange<unsigned int>(0, 999'000);
+    }
+    if (fuzzed_data_provider.ConsumeBool()) {
+        coin_control.m_fee_mode = fuzzed_data_provider.ConsumeBool() ? FeeEstimateMode::CONSERVATIVE : FeeEstimateMode::ECONOMICAL;
     }
 
     FeeCalculation fee_calculation;

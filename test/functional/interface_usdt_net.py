@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (c) 2022 The Bitcoin Core developers
+# Copyright (c) 2022-present The Bitcoin Core developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -17,7 +17,10 @@ except ImportError:
 from test_framework.messages import msg_version
 from test_framework.p2p import P2PInterface
 from test_framework.test_framework import BitcoinTestFramework
-from test_framework.util import assert_equal
+from test_framework.util import (
+    assert_equal,
+    bpf_cflags,
+)
 
 # Tor v3 addresses are 62 chars + 6 chars for the port (':12345').
 MAX_PEER_ADDR_LENGTH = 68
@@ -40,7 +43,8 @@ net_tracepoints_program = """
     MAX_MSG_TYPE_LENGTH,
     MAX_MSG_DATA_LENGTH
 ) + """
-#define MIN(a,b) ({ __typeof__ (a) _a = (a); __typeof__ (b) _b = (b); _a < _b ? _a : _b; })
+// A min() macro. Prefixed with _TRACEPOINT_TEST to avoid collision with other MIN macros.
+#define _TRACEPOINT_TEST_MIN(a,b) ({ __typeof__ (a) _a = (a); __typeof__ (b) _b = (b); _a < _b ? _a : _b; })
 
 struct p2p_message
 {
@@ -60,7 +64,7 @@ int trace_inbound_message(struct pt_regs *ctx) {
     bpf_usdt_readarg_p(3, ctx, &msg.peer_conn_type, MAX_PEER_CONN_TYPE_LENGTH);
     bpf_usdt_readarg_p(4, ctx, &msg.msg_type, MAX_MSG_TYPE_LENGTH);
     bpf_usdt_readarg(5, ctx, &msg.msg_size);
-    bpf_usdt_readarg_p(6, ctx, &msg.msg, MIN(msg.msg_size, MAX_MSG_DATA_LENGTH));
+    bpf_usdt_readarg_p(6, ctx, &msg.msg, _TRACEPOINT_TEST_MIN(msg.msg_size, MAX_MSG_DATA_LENGTH));
     inbound_messages.perf_submit(ctx, &msg, sizeof(msg));
     return 0;
 }
@@ -73,7 +77,7 @@ int trace_outbound_message(struct pt_regs *ctx) {
     bpf_usdt_readarg_p(3, ctx, &msg.peer_conn_type, MAX_PEER_CONN_TYPE_LENGTH);
     bpf_usdt_readarg_p(4, ctx, &msg.msg_type, MAX_MSG_TYPE_LENGTH);
     bpf_usdt_readarg(5, ctx, &msg.msg_size);
-    bpf_usdt_readarg_p(6, ctx, &msg.msg, MIN(msg.msg_size, MAX_MSG_DATA_LENGTH));
+    bpf_usdt_readarg_p(6, ctx, &msg.msg, _TRACEPOINT_TEST_MIN(msg.msg_size, MAX_MSG_DATA_LENGTH));
     outbound_messages.perf_submit(ctx, &msg, sizeof(msg));
     return 0;
 };
@@ -114,18 +118,18 @@ class NetTracepointTest(BitcoinTestFramework):
                          fn_name="trace_inbound_message")
         ctx.enable_probe(probe="net:outbound_message",
                          fn_name="trace_outbound_message")
-        bpf = BPF(text=net_tracepoints_program, usdt_contexts=[ctx], debug=0)
+        bpf = BPF(text=net_tracepoints_program, usdt_contexts=[ctx], debug=0, cflags=bpf_cflags())
 
         EXPECTED_INOUTBOUND_VERSION_MSG = 1
         checked_inbound_version_msg = 0
         checked_outbound_version_msg = 0
         events = []
 
-        def check_p2p_message(event, inbound):
+        def check_p2p_message(event, is_inbound):
             nonlocal checked_inbound_version_msg, checked_outbound_version_msg
             if event.msg_type.decode("utf-8") == "version":
                 self.log.info(
-                    f"check_p2p_message(): {'inbound' if inbound else 'outbound'} {event}")
+                    f"check_p2p_message(): {'inbound' if is_inbound else 'outbound'} {event}")
                 peer = self.nodes[0].getpeerinfo()[0]
                 msg = msg_version()
                 msg.deserialize(BytesIO(bytes(event.msg[:event.msg_size])))
@@ -133,13 +137,12 @@ class NetTracepointTest(BitcoinTestFramework):
                 assert_equal(peer["addr"], event.peer_addr.decode("utf-8"))
                 assert_equal(peer["connection_type"],
                              event.peer_conn_type.decode("utf-8"))
-                if inbound:
+                if is_inbound:
                     checked_inbound_version_msg += 1
                 else:
                     checked_outbound_version_msg += 1
 
         def handle_inbound(_, data, __):
-            nonlocal events
             event = ctypes.cast(data, ctypes.POINTER(P2PMessage)).contents
             events.append((event, True))
 
@@ -157,8 +160,8 @@ class NetTracepointTest(BitcoinTestFramework):
 
         self.log.info(
             "check receipt and content of in- and outbound version messages")
-        for event, inbound in events:
-            check_p2p_message(event, inbound)
+        for event, is_inbound in events:
+            check_p2p_message(event, is_inbound)
         assert_equal(EXPECTED_INOUTBOUND_VERSION_MSG,
                      checked_inbound_version_msg)
         assert_equal(EXPECTED_INOUTBOUND_VERSION_MSG,
@@ -169,4 +172,4 @@ class NetTracepointTest(BitcoinTestFramework):
 
 
 if __name__ == '__main__':
-    NetTracepointTest().main()
+    NetTracepointTest(__file__).main()

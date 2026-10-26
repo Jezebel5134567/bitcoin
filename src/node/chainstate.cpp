@@ -17,6 +17,7 @@
 #include <txdb.h>
 #include <uint256.h>
 #include <util/fs.h>
+#include <util/signalinterrupt.h>
 #include <util/time.h>
 #include <util/translation.h>
 #include <validation.h>
@@ -37,32 +38,32 @@ static ChainstateLoadResult CompleteChainstateInitialization(
     const ChainstateLoadOptions& options) EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
 {
     auto& pblocktree{chainman.m_blockman.m_block_tree_db};
-    // new CBlockTreeDB tries to delete the existing file, which
+    // new BlockTreeDB tries to delete the existing file, which
     // fails if it's still open from the previous loop. Close it first:
     pblocktree.reset();
-    pblocktree = std::make_unique<CBlockTreeDB>(DBParams{
+    pblocktree = std::make_unique<BlockTreeDB>(DBParams{
         .path = chainman.m_options.datadir / "blocks" / "index",
         .cache_bytes = static_cast<size_t>(cache_sizes.block_tree_db),
         .memory_only = options.block_tree_db_in_memory,
-        .wipe_data = options.reindex,
+        .wipe_data = options.wipe_block_tree_db,
         .options = chainman.m_options.block_tree_db});
 
-    if (options.reindex) {
+    if (options.wipe_block_tree_db) {
         pblocktree->WriteReindexing(true);
+        chainman.m_blockman.m_blockfiles_indexed = false;
         //If we're reindexing in prune mode, wipe away unusable block files and all undo data files
         if (options.prune) {
             chainman.m_blockman.CleanupBlockRevFiles();
         }
     }
 
-    if (options.check_interrupt && options.check_interrupt()) return {ChainstateLoadStatus::INTERRUPTED, {}};
+    if (chainman.m_interrupt) return {ChainstateLoadStatus::INTERRUPTED, {}};
 
     // LoadBlockIndex will load m_have_pruned if we've ever removed a
     // block file from disk.
-    // Note that it also sets fReindex global based on the disk flag!
-    // From here on, fReindex and options.reindex values may be different!
+    // Note that it also sets m_blockfiles_indexed based on the disk flag!
     if (!chainman.LoadBlockIndex()) {
-        if (options.check_interrupt && options.check_interrupt()) return {ChainstateLoadStatus::INTERRUPTED, {}};
+        if (chainman.m_interrupt) return {ChainstateLoadStatus::INTERRUPTED, {}};
         return {ChainstateLoadStatus::FAILURE, _("Error loading block database")};
     }
 
@@ -82,13 +83,13 @@ static ChainstateLoadResult CompleteChainstateInitialization(
     // At this point blocktree args are consistent with what's on disk.
     // If we're not mid-reindex (based on disk + args), add a genesis block on disk
     // (otherwise we use the one already on disk).
-    // This is called again in ThreadImport after the reindex completes.
-    if (!fReindex && !chainman.ActiveChainstate().LoadGenesisBlock()) {
+    // This is called again in ImportBlocks after the reindex completes.
+    if (chainman.m_blockman.m_blockfiles_indexed && !chainman.ActiveChainstate().LoadGenesisBlock()) {
         return {ChainstateLoadStatus::FAILURE, _("Error initializing block database")};
     }
 
     auto is_coinsview_empty = [&](Chainstate* chainstate) EXCLUSIVE_LOCKS_REQUIRED(::cs_main) {
-        return options.reindex || options.reindex_chainstate || chainstate->CoinsTip().GetBestBlock().IsNull();
+        return options.wipe_chainstate_db || chainstate->CoinsTip().GetBestBlock().IsNull();
     };
 
     assert(chainman.m_total_coinstip_cache > 0);
@@ -109,7 +110,7 @@ static ChainstateLoadResult CompleteChainstateInitialization(
         chainstate->InitCoinsDB(
             /*cache_size_bytes=*/chainman.m_total_coinsdb_cache * init_cache_fraction,
             /*in_memory=*/options.coins_db_in_memory,
-            /*should_wipe=*/options.reindex || options.reindex_chainstate);
+            /*should_wipe=*/options.wipe_chainstate_db);
 
         if (options.coins_error_cb) {
             chainstate->CoinsErrorCatcher().AddReadErrCallback(options.coins_error_cb);
@@ -141,7 +142,7 @@ static ChainstateLoadResult CompleteChainstateInitialization(
         }
     }
 
-    if (!options.reindex) {
+    if (!options.wipe_block_tree_db) {
         auto chainstates{chainman.GetAll()};
         if (std::any_of(chainstates.begin(), chainstates.end(),
                         [](const Chainstate* cs) EXCLUSIVE_LOCKS_REQUIRED(cs_main) { return cs->NeedsRedownload(); })) {
@@ -185,7 +186,14 @@ ChainstateLoadResult LoadChainstate(ChainstateManager& chainman, const CacheSize
     chainman.InitializeChainstate(options.mempool);
 
     // Load a chain created from a UTXO snapshot, if any exist.
-    chainman.DetectSnapshotChainstate(options.mempool);
+    bool has_snapshot = chainman.DetectSnapshotChainstate();
+
+    if (has_snapshot && options.wipe_chainstate_db) {
+        LogPrintf("[snapshot] deleting snapshot chainstate due to reindexing\n");
+        if (!chainman.DeleteSnapshotChainstate()) {
+            return {ChainstateLoadStatus::FAILURE_FATAL, Untranslated("Couldn't remove snapshot chainstate.")};
+        }
+    }
 
     auto [init_status, init_error] = CompleteChainstateInitialization(chainman, cache_sizes, options);
     if (init_status != ChainstateLoadStatus::SUCCESS) {
@@ -221,7 +229,7 @@ ChainstateLoadResult LoadChainstate(ChainstateManager& chainman, const CacheSize
 
         // A reload of the block index is required to recompute setBlockIndexCandidates
         // for the fully validated chainstate.
-        chainman.ActiveChainstate().UnloadBlockIndex();
+        chainman.ActiveChainstate().ClearBlockIndexCandidates();
 
         auto [init_status, init_error] = CompleteChainstateInitialization(chainman, cache_sizes, options);
         if (init_status != ChainstateLoadStatus::SUCCESS) {
@@ -239,7 +247,7 @@ ChainstateLoadResult LoadChainstate(ChainstateManager& chainman, const CacheSize
 ChainstateLoadResult VerifyLoadedChainstate(ChainstateManager& chainman, const ChainstateLoadOptions& options)
 {
     auto is_coinsview_empty = [&](Chainstate* chainstate) EXCLUSIVE_LOCKS_REQUIRED(::cs_main) {
-        return options.reindex || options.reindex_chainstate || chainstate->CoinsTip().GetBestBlock().IsNull();
+        return options.wipe_chainstate_db || chainstate->CoinsTip().GetBestBlock().IsNull();
     };
 
     LOCK(cs_main);

@@ -16,7 +16,7 @@ class LoggingTest(BitcoinTestFramework):
         self.setup_clean_chain = True
 
     def relative_log_path(self, name):
-        return os.path.join(self.nodes[0].datadir, self.chain, name)
+        return os.path.join(self.nodes[0].chain_path, name)
 
     def run_test(self):
         # test default log file name
@@ -101,4 +101,4 @@ class LoggingTest(BitcoinTestFramework):
 
 
 if __name__ == '__main__':
-    LoggingTest().main()
+    LoggingTest(__file__).main()

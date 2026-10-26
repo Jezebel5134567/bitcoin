@@ -91,7 +91,6 @@ TransactionView::TransactionView(const PlatformStyle *platformStyle, QWidget *pa
                                         TransactionFilterProxy::TYPE(TransactionRecord::RecvFromOther));
     typeWidget->addItem(tr("Sent to"), TransactionFilterProxy::TYPE(TransactionRecord::SendToAddress) |
                                   TransactionFilterProxy::TYPE(TransactionRecord::SendToOther));
-    typeWidget->addItem(tr("To yourself"), TransactionFilterProxy::TYPE(TransactionRecord::SendToSelf));
     typeWidget->addItem(tr("Mined"), TransactionFilterProxy::TYPE(TransactionRecord::Generated));
     typeWidget->addItem(tr("Other"), TransactionFilterProxy::TYPE(TransactionRecord::Other));
 
@@ -397,7 +396,7 @@ void TransactionView::contextualMenu(const QPoint &point)
 
     // check if transaction can be abandoned, disable context menu action in case it doesn't
     uint256 hash;
-    hash.SetHex(selection.at(0).data(TransactionTableModel::TxHashRole).toString().toStdString());
+    hash.SetHexDeprecated(selection.at(0).data(TransactionTableModel::TxHashRole).toString().toStdString());
     abandonAction->setEnabled(model->wallet().transactionCanBeAbandoned(hash));
     bumpFeeAction->setEnabled(model->wallet().transactionCanBeBumped(hash));
     copyAddressAction->setEnabled(GUIUtil::hasEntryData(transactionView, 0, TransactionTableModel::AddressRole));
@@ -417,7 +416,7 @@ void TransactionView::abandonTx()
     // get the hash from the TxHashRole (QVariant / QString)
     uint256 hash;
     QString hashQStr = selection.at(0).data(TransactionTableModel::TxHashRole).toString();
-    hash.SetHex(hashQStr.toStdString());
+    hash.SetHexDeprecated(hashQStr.toStdString());
 
     // Abandon the wallet transaction over the walletModel
     model->wallet().abandonTransaction(hash);
@@ -432,7 +431,7 @@ void TransactionView::bumpFee([[maybe_unused]] bool checked)
     // get the hash from the TxHashRole (QVariant / QString)
     uint256 hash;
     QString hashQStr = selection.at(0).data(TransactionTableModel::TxHashRole).toString();
-    hash.SetHex(hashQStr.toStdString());
+    hash.SetHexDeprecated(hashQStr.toStdString());
 
     // Bump tx fee over the walletModel
     uint256 newHash;
@@ -532,6 +531,9 @@ void TransactionView::showDetails()
         TransactionDescDialog *dlg = new TransactionDescDialog(selection.at(0));
         dlg->setAttribute(Qt::WA_DeleteOnClose);
         m_opened_dialogs.append(dlg);
+        connect(dlg, &QObject::destroyed, [this, dlg] {
+            m_opened_dialogs.removeOne(dlg);
+        });
         dlg->show();
     }
 }

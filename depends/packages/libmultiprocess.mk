@@ -8,7 +8,7 @@ ifneq ($(host),$(build))
 $(package)_dependencies += native_capnp
 endif
 
-define $(package)_set_vars :=
+define $(package)_set_vars
 ifneq ($(host),$(build))
 $(package)_config_opts := -DCAPNP_EXECUTABLE="$$(native_capnp_prefixbin)/capnp"
 $(package)_config_opts += -DCAPNPC_CXX_EXECUTABLE="$$(native_capnp_prefixbin)/capnpc-c++"
@@ -20,7 +20,7 @@ define $(package)_config_cmds
 endef
 
 define $(package)_build_cmds
-  $(MAKE)
+  $(MAKE) multiprocess
 endef
 
 define $(package)_stage_cmds

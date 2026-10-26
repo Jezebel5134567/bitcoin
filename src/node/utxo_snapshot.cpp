@@ -49,7 +49,7 @@ bool WriteSnapshotBaseBlockhash(Chainstate& snapshot_chainstate)
 std::optional<uint256> ReadSnapshotBaseBlockhash(fs::path chaindir)
 {
     if (!fs::exists(chaindir)) {
-        LogPrintf("[snapshot] cannot read base blockhash: no chainstate dir " /* Continued */
+        LogPrintf("[snapshot] cannot read base blockhash: no chainstate dir "
             "exists at path %s\n", fs::PathToString(chaindir));
         return std::nullopt;
     }
@@ -57,7 +57,7 @@ std::optional<uint256> ReadSnapshotBaseBlockhash(fs::path chaindir)
     const std::string read_from_str = fs::PathToString(read_from);
 
     if (!fs::exists(read_from)) {
-        LogPrintf("[snapshot] snapshot chainstate dir is malformed! no base blockhash file " /* Continued */
+        LogPrintf("[snapshot] snapshot chainstate dir is malformed! no base blockhash file "
             "exists at path %s. Try deleting %s and calling loadtxoutset again?\n",
             fs::PathToString(chaindir), read_from_str);
         return std::nullopt;
@@ -73,9 +73,11 @@ std::optional<uint256> ReadSnapshotBaseBlockhash(fs::path chaindir)
     }
     afile >> base_blockhash;
 
-    if (std::fgetc(afile.Get()) != EOF) {
+    int64_t position = afile.tell();
+    afile.seek(0, SEEK_END);
+    if (position != afile.tell()) {
         LogPrintf("[snapshot] warning: unexpected trailing data in %s\n", read_from_str);
-    } else if (std::ferror(afile.Get())) {
+    } else if (afile.IsError()) {
         LogPrintf("[snapshot] warning: i/o error reading %s\n", read_from_str);
     }
     return base_blockhash;

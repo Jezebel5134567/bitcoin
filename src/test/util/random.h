@@ -7,10 +7,25 @@
 
 #include <consensus/amount.h>
 #include <random.h>
-#include <test/util/setup_common.h>
 #include <uint256.h>
 
 #include <cstdint>
+
+/**
+ * This global and the helpers that use it are not thread-safe.
+ *
+ * If thread-safety is needed, a per-thread instance could be
+ * used in the multi-threaded test.
+ */
+extern FastRandomContext g_insecure_rand_ctx;
+
+enum class SeedRand {
+    ZEROS, //!< Seed with a compile time constant of zeros
+    SEED,  //!< Use (and report) random seed from environment, or a (truly) random one.
+};
+
+/** Seed the RNG for testing. This affects all randomness, except GetStrongRandBytes(). */
+void SeedRandomForTest(SeedRand seed = SeedRand::SEED);
 
 static inline uint32_t InsecureRand32()
 {

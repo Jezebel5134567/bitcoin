@@ -25,29 +25,26 @@ class WalletSignerTest(BitcoinTestFramework):
     def mock_signer_path(self):
         path = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'mocks', 'signer.py')
         if platform.system() == "Windows":
-            return "py " + path
+            return "py -3 " + path
         else:
             return path
 
     def mock_invalid_signer_path(self):
         path = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'mocks', 'invalid_signer.py')
         if platform.system() == "Windows":
-            return "py " + path
+            return "py -3 " + path
         else:
             return path
 
     def mock_multi_signers_path(self):
         path = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'mocks', 'multi_signers.py')
         if platform.system() == "Windows":
-            return "py " + path
+            return "py -3 " + path
         else:
             return path
 
     def set_test_params(self):
         self.num_nodes = 2
-        # The experimental syscall sandbox feature (-sandbox) is not compatible with -signer (which
-        # invokes execve).
-        self.disable_syscall_sandbox = True
 
         self.extra_args = [
             [],
@@ -133,8 +130,9 @@ class WalletSignerTest(BitcoinTestFramework):
         assert_equal(address_info['hdkeypath'], "m/86h/1h/0h/0/0")
 
         self.log.info('Test walletdisplayaddress')
-        result = hww.walletdisplayaddress(address1)
-        assert_equal(result, {"address": address1})
+        for address in [address1, address2, address3]:
+            result = hww.walletdisplayaddress(address)
+            assert_equal(result, {"address": address})
 
         # Handle error thrown by script
         self.set_mock_result(self.nodes[1], "2")
@@ -142,6 +140,13 @@ class WalletSignerTest(BitcoinTestFramework):
             hww.walletdisplayaddress, address1
         )
         self.clear_mock_result(self.nodes[1])
+
+        # Returned address MUST match:
+        address_fail = hww.getnewaddress(address_type="bech32")
+        assert_equal(address_fail, "bcrt1ql7zg7ukh3dwr25ex2zn9jse926f27xy2jz58tm")
+        assert_raises_rpc_error(-1, 'Signer echoed unexpected address wrong_address',
+            hww.walletdisplayaddress, address_fail
+        )
 
         self.log.info('Prepare mock PSBT')
         self.nodes[0].sendtoaddress(address4, 1)
@@ -172,8 +177,7 @@ class WalletSignerTest(BitcoinTestFramework):
         dest = self.nodes[0].getnewaddress(address_type='bech32')
         mock_psbt = mock_wallet.walletcreatefundedpsbt([], {dest:0.5}, 0, {'replaceable': True}, True)['psbt']
         mock_psbt_signed = mock_wallet.walletprocesspsbt(psbt=mock_psbt, sign=True, sighashtype="ALL", bip32derivs=True)
-        mock_psbt_final = mock_wallet.finalizepsbt(mock_psbt_signed["psbt"])
-        mock_tx = mock_psbt_final["hex"]
+        mock_tx = mock_psbt_signed["hex"]
         assert mock_wallet.testmempoolaccept([mock_tx])[0]["allowed"]
 
         # # Create a new wallet and populate with specific public keys, in order
@@ -259,4 +263,4 @@ class WalletSignerTest(BitcoinTestFramework):
         assert_raises_rpc_error(-1, "GetExternalSigner: More than one external signer found", self.nodes[1].createwallet, wallet_name='multi_hww', disable_private_keys=True, descriptors=True, external_signer=True)
 
 if __name__ == '__main__':
-    WalletSignerTest().main()
+    WalletSignerTest(__file__).main()

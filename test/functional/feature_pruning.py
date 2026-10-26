@@ -25,6 +25,7 @@ from test_framework.util import (
     assert_equal,
     assert_greater_than,
     assert_raises_rpc_error,
+    try_rpc,
 )
 
 # Rescans start at the earliest block up to 2 hours before a key timestamp, so
@@ -91,7 +92,7 @@ class PruneTest(BitcoinTestFramework):
     def setup_network(self):
         self.setup_nodes()
 
-        self.prunedir = os.path.join(self.nodes[2].datadir, self.chain, 'blocks', '')
+        self.prunedir = os.path.join(self.nodes[2].blocks_path, '')
 
         self.connect_nodes(0, 1)
         self.connect_nodes(1, 2)
@@ -290,7 +291,7 @@ class PruneTest(BitcoinTestFramework):
             assert_equal(ret + 1, node.getblockchaininfo()['pruneheight'])
 
         def has_block(index):
-            return os.path.isfile(os.path.join(self.nodes[node_number].datadir, self.chain, "blocks", f"blk{index:05}.dat"))
+            return os.path.isfile(os.path.join(self.nodes[node_number].blocks_path, f"blk{index:05}.dat"))
 
         # should not prune because chain tip of node 3 (995) < PruneAfterHeight (1000)
         assert_raises_rpc_error(-1, "Blockchain is too short for pruning", node.pruneblockchain, height(500))
@@ -479,7 +480,11 @@ class PruneTest(BitcoinTestFramework):
         self.log.info("Test invalid pruning command line options")
         self.test_invalid_command_line_options()
 
+        self.log.info("Test scanblocks can not return pruned data")
         self.test_scanblocks_pruned()
+
+        self.log.info("Test pruneheight reflects the presence of block and undo data")
+        self.test_pruneheight_undo_presence()
 
         self.log.info("Done")
 
@@ -494,5 +499,18 @@ class PruneTest(BitcoinTestFramework):
         assert_raises_rpc_error(-1, "Block not available (pruned data)", node.scanblocks,
             "start", [{"desc": f"raw({false_positive_spk.hex()})"}], 0, 0, "basic", {"filter_false_positives": True})
 
+    def test_pruneheight_undo_presence(self):
+        node = self.nodes[2]
+        pruneheight = node.getblockchaininfo()["pruneheight"]
+        fetch_block = node.getblockhash(pruneheight - 1)
+
+        self.connect_nodes(1, 2)
+        peers = node.getpeerinfo()
+        node.getblockfrompeer(fetch_block, peers[0]["id"])
+        self.wait_until(lambda: not try_rpc(-1, "Block not available (pruned data)", node.getblock, fetch_block), timeout=5)
+
+        new_pruneheight = node.getblockchaininfo()["pruneheight"]
+        assert_equal(pruneheight, new_pruneheight)
+
 if __name__ == '__main__':
-    PruneTest().main()
+    PruneTest(__file__).main()

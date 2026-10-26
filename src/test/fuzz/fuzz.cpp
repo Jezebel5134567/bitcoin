@@ -1,4 +1,4 @@
-// Copyright (c) 2009-2022 The Bitcoin Core developers
+// Copyright (c) 2009-present The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -6,6 +6,7 @@
 
 #include <netaddress.h>
 #include <netbase.h>
+#include <test/util/random.h>
 #include <test/util/setup_common.h>
 #include <util/check.h>
 #include <util/fs.h>
@@ -25,11 +26,16 @@
 #include <memory>
 #include <string>
 #include <tuple>
-#include <unistd.h>
 #include <utility>
 #include <vector>
 
+#if defined(PROVIDE_FUZZ_MAIN_FUNCTION) && defined(__AFL_FUZZ_INIT)
+__AFL_FUZZ_INIT();
+#endif
+
 const std::function<void(const std::string&)> G_TEST_LOG_FUN{};
+
+const std::function<std::string()> G_TEST_GET_FULL_NAME{};
 
 /**
  * A copy of the command line arguments that start with `--`.
@@ -54,25 +60,57 @@ const std::function<std::vector<const char*>()> G_TEST_COMMAND_LINE_ARGUMENTS = 
     return g_args;
 };
 
-std::map<std::string_view, std::tuple<TypeTestOneInput, TypeInitialize, TypeHidden>>& FuzzTargets()
+struct FuzzTarget {
+    const TypeTestOneInput test_one_input;
+    const FuzzTargetOptions opts;
+};
+
+auto& FuzzTargets()
 {
-    static std::map<std::string_view, std::tuple<TypeTestOneInput, TypeInitialize, TypeHidden>> g_fuzz_targets;
+    static std::map<std::string_view, FuzzTarget> g_fuzz_targets;
     return g_fuzz_targets;
 }
 
-void FuzzFrameworkRegisterTarget(std::string_view name, TypeTestOneInput target, TypeInitialize init, TypeHidden hidden)
+void FuzzFrameworkRegisterTarget(std::string_view name, TypeTestOneInput target, FuzzTargetOptions opts)
 {
-    const auto it_ins = FuzzTargets().try_emplace(name, std::move(target), std::move(init), hidden);
-    Assert(it_ins.second);
+    const auto [it, ins]{FuzzTargets().try_emplace(name, FuzzTarget /* temporary can be dropped after Apple-Clang-16 ? */ {std::move(target), std::move(opts)})};
+    Assert(ins);
 }
 
 static std::string_view g_fuzz_target;
-static TypeTestOneInput* g_test_one_input{nullptr};
+static const TypeTestOneInput* g_test_one_input{nullptr};
+
+
+#if defined(__clang__) && defined(__linux__)
+extern "C" void __llvm_profile_reset_counters(void) __attribute__((weak));
+extern "C" void __gcov_reset(void) __attribute__((weak));
+
+void ResetCoverageCounters()
+{
+    if (__llvm_profile_reset_counters) {
+        __llvm_profile_reset_counters();
+    }
+
+    if (__gcov_reset) {
+        __gcov_reset();
+    }
+}
+#else
+void ResetCoverageCounters() {}
+#endif
+
 
 void initialize()
 {
-    // Terminate immediately if a fuzzing harness ever tries to create a TCP socket.
-    CreateSock = [](const CService&) -> std::unique_ptr<Sock> { std::terminate(); };
+    // By default, make the RNG deterministic with a fixed seed. This will affect all
+    // randomness during the fuzz test, except:
+    // - GetStrongRandBytes(), which is used for the creation of private key material.
+    // - Creating a BasicTestingSetup or derived class will switch to a random seed.
+    SeedRandomForTest(SeedRand::ZEROS);
+
+    // Terminate immediately if a fuzzing harness ever tries to create a socket.
+    // Individual tests can override this by pointing CreateSock to a mocked alternative.
+    CreateSock = [](int, int, int) -> std::unique_ptr<Sock> { std::terminate(); };
 
     // Terminate immediately if a fuzzing harness ever tries to perform a DNS lookup.
     g_dns_lookup = [](const std::string& name, bool allow_lookup) {
@@ -84,22 +122,22 @@ void initialize()
 
     bool should_exit{false};
     if (std::getenv("PRINT_ALL_FUZZ_TARGETS_AND_ABORT")) {
-        for (const auto& t : FuzzTargets()) {
-            if (std::get<2>(t.second)) continue;
-            std::cout << t.first << std::endl;
+        for (const auto& [name, t] : FuzzTargets()) {
+            if (t.opts.hidden) continue;
+            std::cout << name << std::endl;
         }
         should_exit = true;
     }
     if (const char* out_path = std::getenv("WRITE_ALL_FUZZ_TARGETS_AND_ABORT")) {
         std::cout << "Writing all fuzz target names to '" << out_path << "'." << std::endl;
         std::ofstream out_stream{out_path, std::ios::binary};
-        for (const auto& t : FuzzTargets()) {
-            if (std::get<2>(t.second)) continue;
-            out_stream << t.first << std::endl;
+        for (const auto& [name, t] : FuzzTargets()) {
+            if (t.opts.hidden) continue;
+            out_stream << name << std::endl;
         }
-        should_exit= true;
+        should_exit = true;
     }
-    if (should_exit){
+    if (should_exit) {
         std::exit(EXIT_SUCCESS);
     }
     if (const auto* env_fuzz{std::getenv("FUZZ")}) {
@@ -117,16 +155,18 @@ void initialize()
         std::exit(EXIT_FAILURE);
     }
     Assert(!g_test_one_input);
-    g_test_one_input = &std::get<0>(it->second);
-    std::get<1>(it->second)();
+    g_test_one_input = &it->second.test_one_input;
+    it->second.opts.init();
+
+    ResetCoverageCounters();
 }
 
 #if defined(PROVIDE_FUZZ_MAIN_FUNCTION)
 static bool read_stdin(std::vector<uint8_t>& data)
 {
-    uint8_t buffer[1024];
-    ssize_t length = 0;
-    while ((length = read(STDIN_FILENO, buffer, 1024)) > 0) {
+    std::istream::char_type buffer[1024];
+    std::streamsize length;
+    while ((std::cin.read(buffer, 1024), length = std::cin.gcount()) > 0) {
         data.insert(data.end(), buffer, buffer + length);
     }
     return length == 0;
@@ -183,21 +223,13 @@ int main(int argc, char** argv)
 {
     initialize();
     static const auto& test_one_input = *Assert(g_test_one_input);
-#ifdef __AFL_INIT
-    // Enable AFL deferred forkserver mode. Requires compilation using
-    // afl-clang-fast++. See fuzzing.md for details.
-    __AFL_INIT();
-#endif
-
 #ifdef __AFL_LOOP
     // Enable AFL persistent mode. Requires compilation using afl-clang-fast++.
     // See fuzzing.md for details.
-    while (__AFL_LOOP(1000)) {
-        std::vector<uint8_t> buffer;
-        if (!read_stdin(buffer)) {
-            continue;
-        }
-        test_one_input(buffer);
+    const uint8_t* buffer = __AFL_FUZZ_TESTCASE_BUF;
+    while (__AFL_LOOP(100000)) {
+        size_t buffer_len = __AFL_FUZZ_TESTCASE_LEN;
+        test_one_input({buffer, buffer_len});
     }
 #else
     std::vector<uint8_t> buffer;

@@ -7,18 +7,19 @@
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import (
     assert_equal,
-    get_datadir_path,
     str_to_b64str,
 )
 
-import os
 import http.client
+import os
+import platform
 import urllib.parse
 import subprocess
 from random import SystemRandom
 import string
 import configparser
 import sys
+from typing import Optional
 
 
 def call_with_auth(node, user, password):
@@ -38,8 +39,7 @@ class HTTPBasicsTest(BitcoinTestFramework):
         self.num_nodes = 2
         self.supports_cli = False
 
-    def setup_chain(self):
-        super().setup_chain()
+    def conf_setup(self):
         #Append rpcauth to bitcoin.conf before initialization
         self.rtpassword = "cA773lm788buwYe4g4WT+05pKyNruVKjQ25x3n0DQcM="
         rpcauth = "rpcauth=rt:93648e835a54c573682c2eb19f882535$7681e9c5b74bdd85e78166031d2058e1069b3ed7ed967c93fc63abba06f31144"
@@ -64,13 +64,15 @@ class HTTPBasicsTest(BitcoinTestFramework):
         rpcauth3 = lines[1]
         self.password = lines[3]
 
-        with open(os.path.join(get_datadir_path(self.options.tmpdir, 0), "bitcoin.conf"), 'a', encoding='utf8') as f:
+        with open(self.nodes[0].datadir_path / "bitcoin.conf", "a", encoding="utf8") as f:
             f.write(rpcauth + "\n")
             f.write(rpcauth2 + "\n")
             f.write(rpcauth3 + "\n")
-        with open(os.path.join(get_datadir_path(self.options.tmpdir, 1), "bitcoin.conf"), 'a', encoding='utf8') as f:
+        with open(self.nodes[1].datadir_path / "bitcoin.conf", "a", encoding="utf8") as f:
             f.write("rpcuser={}\n".format(self.rpcuser))
             f.write("rpcpassword={}\n".format(self.rpcpassword))
+        self.restart_node(0)
+        self.restart_node(1)
 
     def test_auth(self, node, user, password):
         self.log.info('Correct...')
@@ -85,7 +87,42 @@ class HTTPBasicsTest(BitcoinTestFramework):
         self.log.info('Wrong...')
         assert_equal(401, call_with_auth(node, user + 'wrong', password + 'wrong').status)
 
+    def test_rpccookieperms(self):
+        p = {"owner": 0o600, "group": 0o640, "all": 0o644}
+
+        if platform.system() == 'Windows':
+            self.log.info(f"Skip cookie file permissions checks as OS detected as: {platform.system()=}")
+            return
+
+        self.log.info('Check cookie file permissions can be set using -rpccookieperms')
+
+        cookie_file_path = self.nodes[1].chain_path / '.cookie'
+        PERM_BITS_UMASK = 0o777
+
+        def test_perm(perm: Optional[str]):
+            if not perm:
+                perm = 'owner'
+                self.restart_node(1)
+            else:
+                self.restart_node(1, extra_args=[f"-rpccookieperms={perm}"])
+
+            file_stat = os.stat(cookie_file_path)
+            actual_perms = file_stat.st_mode & PERM_BITS_UMASK
+            expected_perms = p[perm]
+            assert_equal(expected_perms, actual_perms)
+
+        # Remove any leftover rpc{user|password} config options from previous tests
+        self.nodes[1].replace_in_config([("rpcuser", "#rpcuser"), ("rpcpassword", "#rpcpassword")])
+
+        self.log.info('Check default cookie permission')
+        test_perm(None)
+
+        self.log.info('Check custom cookie permissions')
+        for perm in ["owner", "group", "all"]:
+            test_perm(perm)
+
     def run_test(self):
+        self.conf_setup()
         self.log.info('Check correctness of the rpcauth config option')
         url = urllib.parse.urlparse(self.nodes[0].url)
 
@@ -112,10 +149,11 @@ class HTTPBasicsTest(BitcoinTestFramework):
         self.nodes[0].assert_start_raises_init_error(expected_msg=init_error, extra_args=['-rpcauth=foo$bar$baz'])
 
         self.log.info('Check that failure to write cookie file will abort the node gracefully')
-        cookie_file = os.path.join(get_datadir_path(self.options.tmpdir, 0), self.chain, '.cookie.tmp')
-        os.mkdir(cookie_file)
+        (self.nodes[0].chain_path / ".cookie.tmp").mkdir()
         self.nodes[0].assert_start_raises_init_error(expected_msg=init_error)
+
+        self.test_rpccookieperms()
 
 
 if __name__ == '__main__':
-    HTTPBasicsTest().main()
+    HTTPBasicsTest(__file__).main()

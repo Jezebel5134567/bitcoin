@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (c) 2022 The Bitcoin Core developers
+# Copyright (c) 2022-present The Bitcoin Core developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -17,8 +17,10 @@ except ImportError:
 
 from test_framework.address import ADDRESS_BCRT1_UNSPENDABLE
 from test_framework.test_framework import BitcoinTestFramework
-from test_framework.util import assert_equal
-
+from test_framework.util import (
+    assert_equal,
+    bpf_cflags,
+)
 
 validation_blockconnected_program = """
 #include <uapi/linux/ptrace.h>
@@ -86,7 +88,6 @@ class ValidationTracepointTest(BitcoinTestFramework):
                     self.duration)
 
         BLOCKS_EXPECTED = 2
-        blocks_checked = 0
         expected_blocks = dict()
         events = []
 
@@ -95,14 +96,12 @@ class ValidationTracepointTest(BitcoinTestFramework):
         ctx.enable_probe(probe="validation:block_connected",
                          fn_name="trace_block_connected")
         bpf = BPF(text=validation_blockconnected_program,
-                  usdt_contexts=[ctx], debug=0)
+                  usdt_contexts=[ctx], debug=0, cflags=bpf_cflags())
 
         def handle_blockconnected(_, data, __):
-            nonlocal events, blocks_checked
             event = ctypes.cast(data, ctypes.POINTER(Block)).contents
             self.log.info(f"handle_blockconnected(): {event}")
             events.append(event)
-            blocks_checked += 1
 
         bpf["block_connected"].open_perf_buffer(
             handle_blockconnected)
@@ -127,11 +126,11 @@ class ValidationTracepointTest(BitcoinTestFramework):
             # only plausibility checks
             assert event.duration > 0
             del expected_blocks[block_hash]
-        assert_equal(BLOCKS_EXPECTED, blocks_checked)
+        assert_equal(BLOCKS_EXPECTED, len(events))
         assert_equal(0, len(expected_blocks))
 
         bpf.cleanup()
 
 
 if __name__ == '__main__':
-    ValidationTracepointTest().main()
+    ValidationTracepointTest(__file__).main()

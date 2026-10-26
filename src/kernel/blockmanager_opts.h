@@ -5,6 +5,7 @@
 #ifndef BITCOIN_KERNEL_BLOCKMANAGER_OPTS_H
 #define BITCOIN_KERNEL_BLOCKMANAGER_OPTS_H
 
+#include <kernel/notifications_interface.h>
 #include <util/fs.h>
 
 #include <cstdint>
@@ -13,7 +14,7 @@ class CChainParams;
 
 namespace kernel {
 
-static constexpr bool DEFAULT_STOPAFTERBLOCKIMPORT{false};
+static constexpr bool DEFAULT_XOR_BLOCKSDIR{true};
 
 /**
  * An options struct for `BlockManager`, more ergonomically referred to as
@@ -21,10 +22,11 @@ static constexpr bool DEFAULT_STOPAFTERBLOCKIMPORT{false};
  */
 struct BlockManagerOpts {
     const CChainParams& chainparams;
+    bool use_xor{DEFAULT_XOR_BLOCKSDIR};
     uint64_t prune_target{0};
     bool fast_prune{false};
-    bool stop_after_block_import{DEFAULT_STOPAFTERBLOCKIMPORT};
     const fs::path blocks_dir;
+    Notifications& notifications;
 };
 
 } // namespace kernel

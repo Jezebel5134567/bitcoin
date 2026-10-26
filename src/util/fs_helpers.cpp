@@ -5,21 +5,18 @@
 
 #include <util/fs_helpers.h>
 
-#if defined(HAVE_CONFIG_H)
-#include <config/bitcoin-config.h>
-#endif
+#include <config/bitcoin-config.h> // IWYU pragma: keep
 
 #include <logging.h>
 #include <sync.h>
-#include <tinyformat.h>
 #include <util/fs.h>
-#include <util/getuniquepath.h>
+#include <util/syserror.h>
 
 #include <cerrno>
-#include <filesystem>
 #include <fstream>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <system_error>
 #include <utility>
@@ -52,31 +49,35 @@ static GlobalMutex cs_dir_locks;
  * is called.
  */
 static std::map<std::string, std::unique_ptr<fsbridge::FileLock>> dir_locks GUARDED_BY(cs_dir_locks);
-
-bool LockDirectory(const fs::path& directory, const fs::path& lockfile_name, bool probe_only)
+namespace util {
+LockResult LockDirectory(const fs::path& directory, const fs::path& lockfile_name, bool probe_only)
 {
     LOCK(cs_dir_locks);
     fs::path pathLockFile = directory / lockfile_name;
 
     // If a lock for this directory already exists in the map, don't try to re-lock it
     if (dir_locks.count(fs::PathToString(pathLockFile))) {
-        return true;
+        return LockResult::Success;
     }
 
     // Create empty lock file if it doesn't exist.
-    FILE* file = fsbridge::fopen(pathLockFile, "a");
-    if (file) fclose(file);
+    if (auto created{fsbridge::fopen(pathLockFile, "a")}) {
+        std::fclose(created);
+    } else {
+        return LockResult::ErrorWrite;
+    }
     auto lock = std::make_unique<fsbridge::FileLock>(pathLockFile);
     if (!lock->TryLock()) {
-        return error("Error while attempting to lock directory %s: %s", fs::PathToString(directory), lock->GetReason());
+        LogError("Error while attempting to lock directory %s: %s\n", fs::PathToString(directory), lock->GetReason());
+        return LockResult::ErrorLock;
     }
     if (!probe_only) {
         // Lock successful and we're not just probing, put it into the map
         dir_locks.emplace(fs::PathToString(pathLockFile), std::move(lock));
     }
-    return true;
+    return LockResult::Success;
 }
-
+} // namespace util
 void UnlockDirectory(const fs::path& directory, const fs::path& lockfile_name)
 {
     LOCK(cs_dir_locks);
@@ -87,19 +88,6 @@ void ReleaseDirectoryLocks()
 {
     LOCK(cs_dir_locks);
     dir_locks.clear();
-}
-
-bool DirIsWritable(const fs::path& directory)
-{
-    fs::path tmpFile = GetUniquePath(directory);
-
-    FILE* file = fsbridge::fopen(tmpFile, "a");
-    if (!file) return false;
-
-    fclose(file);
-    remove(tmpFile);
-
-    return true;
 }
 
 bool CheckDiskSpace(const fs::path& dir, uint64_t additional_bytes)
@@ -120,28 +108,28 @@ std::streampos GetFileSize(const char* path, std::streamsize max)
 bool FileCommit(FILE* file)
 {
     if (fflush(file) != 0) { // harmless if redundantly called
-        LogPrintf("%s: fflush failed: %d\n", __func__, errno);
+        LogPrintf("fflush failed: %s\n", SysErrorString(errno));
         return false;
     }
 #ifdef WIN32
     HANDLE hFile = (HANDLE)_get_osfhandle(_fileno(file));
     if (FlushFileBuffers(hFile) == 0) {
-        LogPrintf("%s: FlushFileBuffers failed: %d\n", __func__, GetLastError());
+        LogPrintf("FlushFileBuffers failed: %s\n", Win32ErrorString(GetLastError()));
         return false;
     }
 #elif defined(MAC_OSX) && defined(F_FULLFSYNC)
     if (fcntl(fileno(file), F_FULLFSYNC, 0) == -1) { // Manpage says "value other than -1" is returned on success
-        LogPrintf("%s: fcntl F_FULLFSYNC failed: %d\n", __func__, errno);
+        LogPrintf("fcntl F_FULLFSYNC failed: %s\n", SysErrorString(errno));
         return false;
     }
 #elif HAVE_FDATASYNC
     if (fdatasync(fileno(file)) != 0 && errno != EINVAL) { // Ignore EINVAL for filesystems that don't support sync
-        LogPrintf("%s: fdatasync failed: %d\n", __func__, errno);
+        LogPrintf("fdatasync failed: %s\n", SysErrorString(errno));
         return false;
     }
 #else
     if (fsync(fileno(file)) != 0 && errno != EINVAL) {
-        LogPrintf("%s: fsync failed: %d\n", __func__, errno);
+        LogPrintf("fsync failed: %s\n", SysErrorString(errno));
         return false;
     }
 #endif
@@ -260,20 +248,9 @@ fs::path GetSpecialFolderPath(int nFolder, bool fCreate)
 
 bool RenameOver(fs::path src, fs::path dest)
 {
-#ifdef __MINGW64__
-    // This is a workaround for a bug in libstdc++ which
-    // implements std::filesystem::rename with _wrename function.
-    // This bug has been fixed in upstream:
-    //  - GCC 10.3: 8dd1c1085587c9f8a21bb5e588dfe1e8cdbba79e
-    //  - GCC 11.1: 1dfd95f0a0ca1d9e6cbc00e6cbfd1fa20a98f312
-    // For more details see the commits mentioned above.
-    return MoveFileExW(src.wstring().c_str(), dest.wstring().c_str(),
-                       MOVEFILE_REPLACE_EXISTING) != 0;
-#else
     std::error_code error;
     fs::rename(src, dest, error);
     return !error;
-#endif
 }
 
 /**
@@ -292,4 +269,43 @@ bool TryCreateDirectories(const fs::path& p)
 
     // create_directories didn't create the directory, it had to have existed already
     return false;
+}
+
+std::string PermsToSymbolicString(fs::perms p)
+{
+    std::string perm_str(9, '-');
+
+    auto set_perm = [&](size_t pos, fs::perms required_perm, char letter) {
+        if ((p & required_perm) != fs::perms::none) {
+            perm_str[pos] = letter;
+        }
+    };
+
+    set_perm(0, fs::perms::owner_read,   'r');
+    set_perm(1, fs::perms::owner_write,  'w');
+    set_perm(2, fs::perms::owner_exec,   'x');
+    set_perm(3, fs::perms::group_read,   'r');
+    set_perm(4, fs::perms::group_write,  'w');
+    set_perm(5, fs::perms::group_exec,   'x');
+    set_perm(6, fs::perms::others_read,  'r');
+    set_perm(7, fs::perms::others_write, 'w');
+    set_perm(8, fs::perms::others_exec,  'x');
+
+    return perm_str;
+}
+
+std::optional<fs::perms> InterpretPermString(const std::string& s)
+{
+    if (s == "owner") {
+        return fs::perms::owner_read | fs::perms::owner_write;
+    } else if (s == "group") {
+        return fs::perms::owner_read | fs::perms::owner_write |
+               fs::perms::group_read;
+    } else if (s == "all") {
+        return fs::perms::owner_read | fs::perms::owner_write |
+               fs::perms::group_read |
+               fs::perms::others_read;
+    } else {
+        return std::nullopt;
+    }
 }

@@ -13,8 +13,8 @@
 #
 # Note that suppressions may depend on OS and/or library versions.
 # Tested on:
-# * aarch64 (Debian Bookworm system libs, clang, without gui)
-# * x86_64  (Debian Bookworm system libs, clang, without gui)
+# * aarch64 (Ubuntu Noble system libs, clang, without gui)
+# * x86_64  (Ubuntu Noble system libs, clang, without gui)
 {
    Suppress libdb warning - https://bugs.debian.org/cgi-bin/bugreport.cgi?bug=662917
    Memcheck:Cond
@@ -88,4 +88,10 @@
    fun:malloc
    ...
    fun:_ZN5BCLog6Logger12StartLoggingEv
+}
+{
+   Suppress https://bugs.kde.org/show_bug.cgi?id=472219 - fixed in Valgrind 3.22.
+   Memcheck:Param
+   ppoll(ufds.events)
+   obj:/lib/ld-musl-aarch64.so.1
 }

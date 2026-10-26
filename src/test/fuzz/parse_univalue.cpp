@@ -1,9 +1,8 @@
-// Copyright (c) 2009-2022 The Bitcoin Core developers
+// Copyright (c) 2009-present The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <chainparams.h>
-#include <core_io.h>
 #include <rpc/client.h>
 #include <rpc/util.h>
 #include <test/fuzz/fuzz.h>
@@ -17,7 +16,7 @@ void initialize_parse_univalue()
     SelectParams(ChainType::REGTEST);
 }
 
-FUZZ_TARGET_INIT(parse_univalue, initialize_parse_univalue)
+FUZZ_TARGET(parse_univalue, .init = initialize_parse_univalue)
 {
     const std::string random_string(buffer.begin(), buffer.end());
     bool valid = true;
@@ -58,12 +57,6 @@ FUZZ_TARGET_INIT(parse_univalue, initialize_parse_univalue)
     } catch (const UniValue&) {
     }
     try {
-        (void)ParseHexUV(univalue, "A");
-        (void)ParseHexUV(univalue, random_string);
-    } catch (const UniValue&) {
-    } catch (const std::runtime_error&) {
-    }
-    try {
         (void)ParseHexV(univalue, "A");
     } catch (const UniValue&) {
     } catch (const std::runtime_error&) {
@@ -74,8 +67,8 @@ FUZZ_TARGET_INIT(parse_univalue, initialize_parse_univalue)
     } catch (const std::runtime_error&) {
     }
     try {
-        (void)ParseSighashString(univalue);
-    } catch (const std::runtime_error&) {
+        if (univalue.isNull() || univalue.isStr()) (void)ParseSighashString(univalue);
+    } catch (const UniValue&) {
     }
     try {
         (void)AmountFromValue(univalue);
@@ -84,7 +77,7 @@ FUZZ_TARGET_INIT(parse_univalue, initialize_parse_univalue)
     }
     try {
         FlatSigningProvider provider;
-        (void)EvalDescriptorStringOrObject(univalue, provider);
+        if (buffer.size() < 10'000) (void)EvalDescriptorStringOrObject(univalue, provider);
     } catch (const UniValue&) {
     } catch (const std::runtime_error&) {
     }

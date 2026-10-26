@@ -31,7 +31,7 @@ Comments may appear in two ways:
 ### Network specific options
 
 Network specific options can be:
-- placed into sections with headers `[main]` (not `[mainnet]`), `[test]` (not `[testnet]`), `[signet]` or `[regtest]`;
+- placed into sections with headers `[main]` (not `[mainnet]`), `[test]` (not `[testnet]`, for testnet3), `[testnet4]`, `[signet]` or `[regtest]`;
 - prefixed with a chain name; e.g., `regtest.maxmempool=100`.
 
 Network specific options take precedence over non-network specific options.
@@ -59,7 +59,7 @@ The `includeconf=<file>` option in the `bitcoin.conf` file can be used to includ
 
 Operating System | Data Directory | Example Path
 -- | -- | --
-Windows | `%APPDATA%\Bitcoin\` | `C:\Users\username\AppData\Roaming\Bitcoin\bitcoin.conf`
+Windows | `%LOCALAPPDATA%\Bitcoin\` | `C:\Users\username\AppData\Local\Bitcoin\bitcoin.conf`
 Linux | `$HOME/.bitcoin/` | `/home/username/.bitcoin/bitcoin.conf`
 macOS | `$HOME/Library/Application Support/Bitcoin/` | `/Users/username/Library/Application Support/Bitcoin/bitcoin.conf`
 

@@ -6,9 +6,7 @@
 #ifndef BITCOIN_INIT_H
 #define BITCOIN_INIT_H
 
-#include <any>
-#include <memory>
-#include <string>
+#include <atomic>
 
 //! Default value for -daemon option
 static constexpr bool DEFAULT_DAEMON = false;
@@ -25,6 +23,11 @@ struct Context;
 namespace node {
 struct NodeContext;
 } // namespace node
+
+/** Initialize node context shutdown and args variables. */
+void InitContext(node::NodeContext& node);
+/** Return whether node shutdown was requested. */
+bool ShutdownRequested(node::NodeContext& node);
 
 /** Interrupt threads */
 void Interrupt(node::NodeContext& node);
@@ -44,7 +47,7 @@ bool AppInitBasicSetup(const ArgsManager& args, std::atomic<int>& exit_status);
  * @note This can be done before daemonization. Do not call Shutdown() if this function fails.
  * @pre Parameters should be parsed and config file should be read, AppInitBasicSetup should have been called.
  */
-bool AppInitParameterInteraction(const ArgsManager& args, bool use_syscall_sandbox = true);
+bool AppInitParameterInteraction(const ArgsManager& args);
 /**
  * Initialization sanity checks.
  * @note This can be done before daemonization. Do not call Shutdown() if this function fails.
@@ -72,5 +75,8 @@ bool AppInitMain(node::NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip
  * Register all arguments with the ArgsManager
  */
 void SetupServerArgs(ArgsManager& argsman);
+
+/** Validates requirements to run the indexes and spawns each index initial sync thread */
+bool StartIndexBackgroundSync(node::NodeContext& node);
 
 #endif // BITCOIN_INIT_H

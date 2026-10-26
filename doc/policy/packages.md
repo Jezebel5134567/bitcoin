@@ -18,25 +18,47 @@ tip or some preceding transaction in the package.
 
 The following rules are enforced for all packages:
 
-* Packages cannot exceed `MAX_PACKAGE_COUNT=25` count and `MAX_PACKAGE_SIZE=101KvB` total size
+* Packages cannot exceed `MAX_PACKAGE_COUNT=25` count and `MAX_PACKAGE_WEIGHT=404000` total weight
    (#20833)
 
-   - *Rationale*: This is already enforced as mempool ancestor/descendant limits. If
-     transactions in a package are all related, exceeding this limit would mean that the package
-     can either be split up or it wouldn't pass individual mempool policy.
+   - *Rationale*: We want package size to be as small as possible to mitigate DoS via package
+     validation. However, we want to make sure that the limit does not restrict ancestor
+     packages that would be allowed if submitted individually.
 
    - Note that, if these mempool limits change, package limits should be reconsidered. Users may
      also configure their mempool limits differently.
+
+   - Note that this is transaction weight, not "virtual" size as with other limits to allow
+     simpler context-less checks.
 
 * Packages must be topologically sorted. (#20833)
 
 * Packages cannot have conflicting transactions, i.e. no two transactions in a package can spend
    the same inputs. Packages cannot have duplicate transactions. (#20833)
 
-* No transaction in a package can conflict with a mempool transaction. Replace By Fee is
-  currently disabled for packages. (#20833)
+* Only limited package replacements are currently considered. (#28984)
 
-   - Package RBF may be enabled in the future.
+   - If `-mempoolfullrbf=0` (the value is 1 by default), all direct conflicts must signal replacement.
+
+   - Packages are 1-parent-1-child, with no in-mempool ancestors of the package.
+
+   - All conflicting clusters (connected components of mempool transactions) must be clusters of up to size 2.
+
+   - No more than MAX_REPLACEMENT_CANDIDATES transactions can be replaced, analogous to
+     regular [replacement rule](./mempool-replacements.md) 5).
+
+   - Replacements must pay more total total fees at the incremental relay fee (analogous to
+     regular [replacement rules](./mempool-replacements.md) 3 and 4).
+
+   - Parent feerate must be lower than package feerate.
+
+   - Must improve [feerate diagram](https://delvingbitcoin.org/t/mempool-incentive-compatibility/553). (#29242)
+
+   - *Rationale*: Basic support for package RBF can be used by wallets
+     by making chains of no longer than two, then directly conflicting
+     those chains when needed. Combined with TRUC transactions this can
+     result in more robust fee bumping. More general package RBF may be
+     enabled in the future.
 
 * When packages are evaluated against ancestor/descendant limits, the union of all transactions'
   descendants and ancestors is considered. (#21800)
@@ -45,8 +67,13 @@ The following rules are enforced for all packages:
      heavily connected, i.e. some transaction in the package is the ancestor or descendant of all
      the other transactions.
 
-The following rules are only enforced for packages to be submitted to the mempool (not enforced for
-test accepts):
+* [CPFP Carve Out](./mempool-limits.md#CPFP-Carve-Out) is disabled in packaged contexts. (#21800)
+
+   - *Rationale*: This carve out cannot be accurately applied when there are multiple transactions'
+     ancestors and descendants being considered at the same time.
+
+The following rules are only enforced for packages to be submitted to the mempool (not
+enforced for test accepts):
 
 * Packages must be child-with-unconfirmed-parents packages. This also means packages must contain at
   least 2 transactions. (#22674)

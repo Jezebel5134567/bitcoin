@@ -83,9 +83,10 @@ CLTV_HEIGHT = 111
 class BIP65Test(BitcoinTestFramework):
     def set_test_params(self):
         self.num_nodes = 1
+        # whitelist peers to speed up tx relay / mempool sync
+        self.noban_tx_relay = True
         self.extra_args = [[
             f'-testactivationheight=cltv@{CLTV_HEIGHT}',
-            '-whitelist=noban@127.0.0.1',
             '-par=1',  # Use only one script thread to get the exact reject reason for testing
             '-acceptnonstdtxn=1',  # cltv_invalidate is nonstandard
         ]]
@@ -151,11 +152,11 @@ class BIP65Test(BitcoinTestFramework):
             cltv_invalidate(spendtx, i)
 
             expected_cltv_reject_reason = [
-                "non-mandatory-script-verify-flag (Operation not valid with the current stack size)",
-                "non-mandatory-script-verify-flag (Negative locktime)",
-                "non-mandatory-script-verify-flag (Locktime requirement not satisfied)",
-                "non-mandatory-script-verify-flag (Locktime requirement not satisfied)",
-                "non-mandatory-script-verify-flag (Locktime requirement not satisfied)",
+                "mandatory-script-verify-flag-failed (Operation not valid with the current stack size)",
+                "mandatory-script-verify-flag-failed (Negative locktime)",
+                "mandatory-script-verify-flag-failed (Locktime requirement not satisfied)",
+                "mandatory-script-verify-flag-failed (Locktime requirement not satisfied)",
+                "mandatory-script-verify-flag-failed (Locktime requirement not satisfied)",
             ][i]
             # First we show that this tx is valid except for CLTV by getting it
             # rejected from the mempool for exactly that reason.
@@ -194,4 +195,4 @@ class BIP65Test(BitcoinTestFramework):
 
 
 if __name__ == '__main__':
-    BIP65Test().main()
+    BIP65Test(__file__).main()

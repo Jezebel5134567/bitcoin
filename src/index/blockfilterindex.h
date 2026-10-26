@@ -12,6 +12,8 @@
 #include <index/base.h>
 #include <util/hasher.h>
 
+#include <unordered_map>
+
 static const char* const DEFAULT_BLOCKFILTERINDEX = "0";
 
 /** Interval between compact filter checkpoints. See BIP 157. */
@@ -40,7 +42,14 @@ private:
     /** cache of block hash to filter header, to avoid disk access when responding to getcfcheckpt. */
     std::unordered_map<uint256, uint256, FilterHeaderHasher> m_headers_cache GUARDED_BY(m_cs_headers_cache);
 
+    // Last computed header to avoid disk reads on every new block.
+    uint256 m_last_header{};
+
     bool AllowPrune() const override { return true; }
+
+    bool Write(const BlockFilter& filter, uint32_t block_height, const uint256& filter_header);
+
+    std::optional<uint256> ReadFilterHeader(int height, const uint256& expected_block_hash);
 
 protected:
     bool CustomInit(const std::optional<interfaces::BlockKey>& block) override;
